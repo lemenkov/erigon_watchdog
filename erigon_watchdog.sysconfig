@@ -1,0 +1,4 @@
+# Fill this one please!
+REFERENCE_URL=https://<main_address>/ogrpc?network=<api_key>
+# LOCAL_URL=http://localhost:8545
+# THRESHOLD=20

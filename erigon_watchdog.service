@@ -1,0 +1,25 @@
+[Unit]
+Description=A simple watchdog application for Erigon
+Requires=network-online.target
+After=network-online.target erigon.service
+
+[Service]
+EnvironmentFile=/etc/sysconfig/erigon_monitor
+ExecStart=/usr/bin/erigon_watchdog
+CapabilityBoundingSet=
+DynamicUser=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=tmpfs
+ProtectSystem=strict
+Restart=always
+RestartSec=60
+RestrictNamespaces=yes
+RestrictRealtime=yes
+Type=simple
+WorkingDirectory=/tmp
+
+[Install]
+WantedBy=multi-user.target
