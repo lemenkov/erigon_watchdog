@@ -4,7 +4,7 @@ Requires=network-online.target
 After=network-online.target erigon.service
 
 [Service]
-EnvironmentFile=/etc/sysconfig/erigon_monitor
+EnvironmentFile=/etc/sysconfig/erigon_watchdog
 ExecStart=/usr/bin/erigon_watchdog
 CapabilityBoundingSet=
 DynamicUser=yes

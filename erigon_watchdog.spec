@@ -1,5 +1,5 @@
 Name:           erigon_watchdog
-Version:        1.0.1
+Version:        1.0.2
 Release:        %autorelease
 Summary:        A simple watchdog application for Erigon
 License:        MIT
