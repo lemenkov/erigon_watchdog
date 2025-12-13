@@ -1,9 +1,14 @@
 #!/usr/bin/python3
 
+import dbus
 import os
 import requests
+import sys
 import time
-import dbus
+
+# Ensure stdout is line-buffered for real-time logging
+# Equivalent to PYTHONUNBUFFERED=1
+sys.stdout.reconfigure(line_buffering=True)
 
 reference_url = os.environ['REFERENCE_URL']
 local_url = os.environ.get('LOCAL_URL', 'http://localhost:8545')
