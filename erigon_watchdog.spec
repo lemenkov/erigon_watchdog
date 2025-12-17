@@ -1,5 +1,5 @@
 Name:           erigon_watchdog
-Version:        1.0.4
+Version:        1.0.5
 Release:        %autorelease
 Summary:        A simple watchdog application for Erigon
 License:        MIT
@@ -21,7 +21,7 @@ Requires:       python3-requests
 install -D -p -m 0755 %{name} %{buildroot}%{_bindir}/%{name}
 install -D -p -m 0644 %{name}.service %{buildroot}%{_unitdir}/%{name}.service
 install -D -p -m 0600 %{name}.sysconfig %{buildroot}%{_sysconfdir}/sysconfig/%{name}
-install -D -p -m 0644 10-erigon-watchdog.rules %{buildroot}%{_prefix}/lib/udev/rules.d/10-erigon-watchdog.rules
+install -D -p -m 0644 10-erigon-watchdog.rules %{buildroot}%{_datadir}/polkit-1/rules.d/10-erigon-watchdog.rules
 
 %post
 %systemd_post %{name}.service
@@ -36,7 +36,7 @@ install -D -p -m 0644 10-erigon-watchdog.rules %{buildroot}%{_prefix}/lib/udev/r
 %license LICENSE
 %{_bindir}/%{name}
 %{_unitdir}/%{name}.service
-%{_prefix}/lib/udev/rules.d/10-erigon-watchdog.rules
+%{_datadir}/polkit-1/rules.d/10-erigon-watchdog.rules
 %config(noreplace) %{_sysconfdir}/sysconfig/%{name}
 
 %changelog
