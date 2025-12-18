@@ -1,5 +1,5 @@
 Name:           erigon_watchdog
-Version:        1.0.5
+Version:        1.0.6
 Release:        %autorelease
 Summary:        A simple watchdog application for Erigon
 License:        MIT
@@ -8,6 +8,7 @@ VCS:            git:%{url}.git
 Source0:        %{url}/archive/%{version}/%{name}-%{version}.tar.gz
 BuildArch:      noarch
 BuildRequires:  systemd-rpm-macros
+Requires:       polkit
 Requires:       python3-dbus
 Requires:       python3-requests
 
