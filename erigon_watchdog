@@ -48,6 +48,7 @@ DUMP_DIR = Path(os.environ.get("RUNTIME_DIRECTORY", "/run/erigon_watchdog"))
 # State tracking
 erigon_restart_count = 0
 last_successful_drift = None
+is_restarted = False
 
 def http_get(url, timeout=10):
     """HTTP GET using urllib."""
@@ -60,7 +61,7 @@ def http_post_json(url, data, timeout=10):
     payload = json.dumps(data).encode('utf-8')
     req = urllib.request.Request(url, data=payload,
                                  headers={"Content-Type": "application/json",
-                                          {"User-Agent": "Python/3.13 aiohttp/3.10.11"})
+                                          "User-Agent": "Python/3.13 aiohttp/3.10.11"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
@@ -183,7 +184,7 @@ def cleanup_old_dumps(max_files=20):
         print(f"Error cleaning up dumps: {e}")
 
 def main():
-    global erigon_restart_count, last_successful_drift
+    global erigon_restart_count, last_successful_drift, is_restarted
 
     if not REFERENCE_URL:
         print("ERROR: REFERENCE_URL environment variable not set")
@@ -204,60 +205,66 @@ def main():
             time.sleep(60)
             continue
 
-        # Log drift (main output for monitoring)
         if drift > THRESHOLD:
+            # Above threshold
+            if is_restarted:
+                # Already restarted, wait for recovery
+                print(f"{drift}")
+                time.sleep(60)
+                continue
+
             print(f"{drift} (threshold: {THRESHOLD})")
-        else:
-            print(str(drift))
-            # Reset restart counter on healthy operation
-            if drift < THRESHOLD // 2:
-                erigon_restart_count = 0
-            last_successful_drift = drift
-            time.sleep(60)
-            continue
 
-        # === Drift exceeds threshold - diagnose and act ===
+            # === Drift exceeds threshold - diagnose and act ===
 
-        # Check 1: Aggregation in progress? (wait it out)
-        if check_recent_logs("aggregat"):
-            print("Aggregation in progress, waiting...")
-            time.sleep(60)
-            continue
+            # Check 1: Aggregation in progress? (wait it out)
+            if check_recent_logs("aggregat"):
+                print("Aggregation in progress, waiting...")
+                time.sleep(60)
+                continue
 
-        # Check 2: CL communication failure? (restart CL, not Erigon)
-        if EXTERNAL_CL and check_recent_logs("no CL requests"):
-            print("Detected CL communication failure")
-            capture_pprof_dump()
-            capture_erigon_logs()
-            restart_service(CL_SERVICE)
-            erigon_restart_count = 0
-            time.sleep(60)
-            continue
-
-        # Check 3: Too many Erigon restarts without improvement?
-        if erigon_restart_count >= MAX_ERIGON_RESTARTS:
-            print(f"Erigon restarted {erigon_restart_count} times without recovery")
-            if EXTERNAL_CL:
-                print("Trying CL restart instead")
+            # Check 2: CL communication failure? (restart CL, not Erigon)
+            if EXTERNAL_CL and check_recent_logs("no CL requests"):
+                print("Detected CL communication failure")
                 capture_pprof_dump()
                 capture_erigon_logs()
                 restart_service(CL_SERVICE)
-                erigon_restart_count = 0
+                is_restarted = True
                 time.sleep(60)
                 continue
-            else:
-                print("No external CL configured, continuing with Erigon restarts")
-                erigon_restart_count = 0
 
-        # Default: Restart Erigon
-        print(f"restarting Erigon (attempt {erigon_restart_count + 1})")
-        capture_pprof_dump()
-        capture_erigon_logs()
-        restart_service("erigon")
-        erigon_restart_count += 1
+            # Check 3: Too many Erigon restarts without improvement?
+            if erigon_restart_count >= MAX_ERIGON_RESTARTS:
+                print(f"Erigon restarted {erigon_restart_count} times without recovery")
+                if EXTERNAL_CL:
+                    print("Trying CL restart instead")
+                    capture_pprof_dump()
+                    capture_erigon_logs()
+                    restart_service(CL_SERVICE)
+                    erigon_restart_count = 0
+                    is_restarted = True
+                    time.sleep(60)
+                    continue
+                else:
+                    print("No external CL configured, continuing with Erigon restarts")
+                    erigon_restart_count = 0
 
-        # Cleanup old dumps periodically
-        cleanup_old_dumps()
+            # Default: Restart Erigon
+            print(f"restarting Erigon (attempt {erigon_restart_count + 1})")
+            capture_pprof_dump()
+            capture_erigon_logs()
+            restart_service("erigon")
+            erigon_restart_count += 1
+            is_restarted = True
+
+            # Cleanup old dumps periodically
+            cleanup_old_dumps()
+        else:
+            # Below threshold - reset restart flag
+            print(f"{drift}")
+            is_restarted = False
+            erigon_restart_count = 0
+            last_successful_drift = drift
 
         time.sleep(60)
 
