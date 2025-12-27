@@ -113,16 +113,26 @@ def check_recent_logs(pattern, minutes=5):
         print(f"Error checking logs: {e}")
         return False
 
-def capture_pprof_dump():
+def capture_iostat(timestamp):
+    """Capture iostat for disk I/O analysis."""
+    try:
+        iostat_file = DUMP_DIR / f"iostat_{timestamp}.txt"
+        result = subprocess.run(
+            ["iostat", "-x", "1", "3"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        iostat_file.write_text(result.stdout)
+        print(f"Captured iostat to {iostat_file}")
+    except Exception as e:
+        print(f"Failed to capture iostat: {e}")
+
+def capture_pprof_dump(timestamp):
     """Capture goroutine dump for post-mortem analysis."""
     try:
-        DUMP_DIR.mkdir(parents=True, exist_ok=True)
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dump_file = DUMP_DIR / f"goroutine_{timestamp}.txt"
-
         dump_content = http_get(f"{PPROF_URL}/debug/pprof/goroutine?debug=2", timeout=10)
-
         dump_file.write_text(dump_content)
         print(f"Captured pprof dump: {dump_file}")
 
@@ -139,32 +149,21 @@ def capture_pprof_dump():
 
         top_states = sorted(goroutine_states.items(), key=lambda x: -x[1])[:5]
         print(f"Goroutine states: {dict(top_states)}")
-
-        return dump_file
-
     except Exception as e:
         print(f"Error capturing pprof dump: {e}")
-        return None
 
-def capture_erigon_logs():
+def capture_erigon_logs(timestamp):
     """Capture recent Erigon logs for context."""
     try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = DUMP_DIR / f"erigon_logs_{timestamp}.txt"
-
         result = subprocess.run(
             ["journalctl", "-u", "erigon", "--since", "10 min ago", "--no-pager"],
             capture_output=True, text=True, timeout=10
         )
-
         log_file.write_text(result.stdout)
         print(f"Captured Erigon logs: {log_file}")
-
-        return log_file
-
     except Exception as e:
         print(f"Error capturing Erigon logs: {e}")
-        return None
 
 def restart_service(service_name):
     """Restart a systemd service via D-Bus. Returns True on success."""
@@ -235,6 +234,8 @@ def main():
             print(f"{drift} (threshold: {THRESHOLD})")
 
             # === Drift exceeds threshold - diagnose and act ===
+            DUMP_DIR.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             # Check 1: Aggregation in progress? (wait it out)
             if check_recent_logs("aggregat"):
@@ -245,8 +246,9 @@ def main():
             # Check 2: CL communication failure? (restart CL, not Erigon)
             if EXTERNAL_CL and check_recent_logs("no CL requests"):
                 print("Detected CL communication failure")
-                capture_pprof_dump()
-                capture_erigon_logs()
+                capture_iostat(timestamp)
+                capture_pprof_dump(timestamp)
+                capture_erigon_logs(timestamp)
                 if restart_service(CL_SERVICE):
                     is_restarted = True
                 time.sleep(60)
@@ -257,8 +259,9 @@ def main():
                 print(f"Erigon restarted {erigon_restart_count} times without recovery")
                 if EXTERNAL_CL:
                     print("Trying CL restart instead")
-                    capture_pprof_dump()
-                    capture_erigon_logs()
+                    capture_iostat(timestamp)
+                    capture_pprof_dump(timestamp)
+                    capture_erigon_logs(timestamp)
                     if restart_service(CL_SERVICE):
                         is_restarted = True
                     erigon_restart_count = 0
@@ -270,8 +273,9 @@ def main():
 
             # Default: Restart Erigon
             print(f"restarting Erigon (attempt {erigon_restart_count + 1})")
-            capture_pprof_dump()
-            capture_erigon_logs()
+            capture_iostat(timestamp)
+            capture_pprof_dump(timestamp)
+            capture_erigon_logs(timestamp)
             if restart_service("erigon"):
                 erigon_restart_count += 1
                 is_restarted = True

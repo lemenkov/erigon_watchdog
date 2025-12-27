@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 Name:           erigon_watchdog
-Version:        2.0.3
+Version:        2.1.0
 Release:        %autorelease
 Summary:        A simple watchdog application for Erigon
 License:        MIT
@@ -13,6 +13,7 @@ BuildArch:      noarch
 BuildRequires:  systemd-rpm-macros
 Requires:       polkit
 Requires:       python3-dbus
+Requires:       sysstat
 
 %description
 %{summary}.
