@@ -1,25 +1,35 @@
+# SPDX-FileCopyrightText: 2025 Peter Lemenkov <lemenkov@gmail.com>
+# SPDX-License-Identifier: MIT
+
 [Unit]
-Description=A simple watchdog application for Erigon
+Description=Erigon watchdog multi-failure detection with diagnostics
 Requires=network-online.target
 After=network-online.target erigon.service
 
 [Service]
-EnvironmentFile=/etc/sysconfig/erigon_watchdog
+EnvironmentFile=-/etc/sysconfig/erigon_watchdog
 ExecStart=/usr/bin/erigon_watchdog
-CapabilityBoundingSet=
+Type=simple
+Restart=on-failure
+RestartSec=10
+
+# Security hardening
 DynamicUser=yes
+RuntimeDirectory=erigon_watchdog
+RuntimeDirectoryMode=0750
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectHome=tmpfs
+ProtectHome=yes
 ProtectSystem=strict
-Restart=always
-RestartSec=60
 RestrictNamespaces=yes
 RestrictRealtime=yes
-Type=simple
-WorkingDirectory=/tmp
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=erigon_watchdog
 
 [Install]
 WantedBy=multi-user.target

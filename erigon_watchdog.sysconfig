@@ -1,4 +1,27 @@
-# Fill this one please!
-REFERENCE_URL=https://<main_address>/ogrpc?network=<api_key>
-# LOCAL_URL=http://localhost:8545
-# THRESHOLD=20
+# SPDX-FileCopyrightText: 2025 Peter Lemenkov <lemenkov@gmail.com>
+# SPDX-License-Identifier: MIT
+
+# Erigon Watchdog onfiguration
+# /etc/sysconfig/erigon_watchdog
+
+# Required: Reference server to compare block height against
+REFERENCE_URL=http://your-reference-server:8545
+
+# Local Erigon RPC endpoint (default: http://localhost:8545)
+LOCAL_URL=http://localhost:8545
+
+# Block drift threshold before taking action (default: 20)
+THRESHOLD=20
+
+# Pprof endpoint for capturing diagnostics (default: http://localhost:6060)
+PPROF_URL=http://localhost:6060
+
+# === External Consensus Layer Settings ===
+# Set to "1" if using Prysm or other external CL (default: 0)
+EXTERNAL_CL=0
+
+# Name of the CL systemd service (default: beacon-chain)
+CL_SERVICE=beacon-chain
+
+# Max Erigon restarts before trying CL restart (default: 3)
+MAX_ERIGON_RESTARTS=3

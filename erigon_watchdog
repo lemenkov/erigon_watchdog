@@ -1,56 +1,264 @@
 #!/usr/bin/python3
+# SPDX-FileCopyrightText: 2025 Peter Lemenkov <lemenkov@gmail.com>
+# SPDX-License-Identifier: MIT
+"""
+Erigon Watchdog v2 - Multi-failure detection with diagnostics capture
 
-import dbus
+Features:
+- Captures pprof goroutine dump before restart (for post-mortem analysis)
+- Detects CL failures ("no CL requests") and restarts beacon-chain instead
+- Detects aggregation in progress and waits instead of restarting
+- Tracks restart effectiveness to detect wrong-service-restart loops
+
+Environment variables (via /etc/sysconfig/erigon_watchdog):
+    REFERENCE_URL       - URL to get reference block height (required)
+    LOCAL_URL           - Local Erigon RPC URL (default: http://localhost:8545)
+    THRESHOLD           - Block drift threshold to trigger restart (default: 20)
+    PPROF_URL           - Pprof endpoint (default: http://localhost:6060)
+    EXTERNAL_CL         - Set to "1" if using external CL like Prysm (default: 0)
+    CL_SERVICE          - Consensus layer service name (default: beacon-chain)
+    MAX_ERIGON_RESTARTS - Max Erigon restarts before trying CL (default: 3)
+"""
+
+import json
 import os
-import requests
+import subprocess
 import sys
 import time
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
 
-# Ensure stdout is line-buffered for real-time logging
-# Equivalent to PYTHONUNBUFFERED=1
+# Ensure stdout is line-buffered for real-time logging to journald
 sys.stdout.reconfigure(line_buffering=True)
 
-reference_url = os.environ['REFERENCE_URL']
-local_url = os.environ.get('LOCAL_URL', 'http://localhost:8545')
-threshold = int(os.environ.get('THRESHOLD', '20'))
+# Configuration from environment
+REFERENCE_URL = os.environ.get("REFERENCE_URL")
+LOCAL_URL = os.environ.get("LOCAL_URL", "http://localhost:8545")
+THRESHOLD = int(os.environ.get("THRESHOLD", "20"))
+PPROF_URL = os.environ.get("PPROF_URL", "http://localhost:6060")
+EXTERNAL_CL = os.environ.get("EXTERNAL_CL", "0") == "1"
+CL_SERVICE = os.environ.get("CL_SERVICE", "beacon-chain")
+MAX_ERIGON_RESTARTS = int(os.environ.get("MAX_ERIGON_RESTARTS", "3"))
 
-data = {'jsonrpc': '2.0', 'method': 'eth_blockNumber', 'params': [], 'id': 1}
+# Runtime directory for dumps (provided by systemd RuntimeDirectory=)
+DUMP_DIR = Path(os.environ.get("RUNTIME_DIRECTORY", "/run/erigon_watchdog"))
 
-def get_systemd_manager():
-    bus = dbus.SystemBus(private=True)
-    systemd1 = bus.get_object('org.freedesktop.systemd1', '/org/freedesktop/systemd1')
-    manager = dbus.Interface(systemd1, 'org.freedesktop.systemd1.Manager')
-    return bus, manager
+# State tracking
+erigon_restart_count = 0
+last_successful_drift = None
 
-bus, manager = get_systemd_manager()
-is_restarted = False
+def http_get(url, timeout=5):
+    """HTTP GET using urllib."""
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode('utf-8')
 
-while True:
+def http_post_json(url, data, timeout=5):
+    """HTTP POST JSON using urllib."""
+    payload = json.dumps(data).encode('utf-8')
+    req = urllib.request.Request(url, data=payload,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+def get_block_number(url):
+    """Get current block number from an Ethereum RPC endpoint."""
     try:
-        ret0 = requests.post(reference_url, json=data, timeout=(5, 5))
-        ret1 = requests.post(local_url, json=data, timeout=(5, 5))
-
-        diff = int(ret0.json()['result'], 16) - int(ret1.json()['result'], 16)
-
-        if diff > threshold:
-            print(f"{diff} restarting Erigon")
-            if not is_restarted:
-                manager.RestartUnit('erigon.service', 'fail')
-            is_restarted = True
-        else:
-            is_restarted = False
-            print(f"{diff}")
-
-    except requests.exceptions.Timeout:
-        print("Timed out")
-    except dbus.exceptions.DBusException as e:
-        print(f"D-Bus error, reinitializing: {e}")
-        try:
-            bus.close()
-        except Exception:
-            pass
-        bus, manager = get_systemd_manager()
+        data = {
+            "jsonrpc": "2.0",
+            "method": "eth_blockNumber",
+            "params": [],
+            "id": 1
+        }
+        result = http_post_json(url, data)
+        return int(result["result"], 16)
     except Exception as e:
-        print(f"Unknown exception {e}")
+        print(f"Error getting block number from {url}: {e}")
+        return None
 
-    time.sleep(60)
+def get_block_drift():
+    """Calculate block drift between local and reference."""
+    reference = get_block_number(REFERENCE_URL)
+    local = get_block_number(LOCAL_URL)
+
+    if reference is None or local is None:
+        return None
+
+    return reference - local
+
+def check_recent_logs(pattern, minutes=5):
+    """Check if pattern appears in recent Erigon logs."""
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "erigon", "--since", f"{minutes} min ago", "--no-pager"],
+            capture_output=True, text=True, timeout=10
+        )
+        return pattern.lower() in result.stdout.lower()
+    except Exception as e:
+        print(f"Error checking logs: {e}")
+        return False
+
+def capture_pprof_dump():
+    """Capture goroutine dump for post-mortem analysis."""
+    try:
+        DUMP_DIR.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dump_file = DUMP_DIR / f"goroutine_{timestamp}.txt"
+
+        dump_content = http_get(f"{PPROF_URL}/debug/pprof/goroutine?debug=2", timeout=10)
+
+        dump_file.write_text(dump_content)
+        print(f"Captured pprof dump: {dump_file}")
+
+        # Also capture a summary to logs for quick analysis
+        goroutine_states = {}
+        for line in dump_content.split('\n'):
+            if line.startswith('goroutine ') and '[' in line:
+                state = line.split('[')[1].split(']')[0].split(',')[0]
+                goroutine_states[state] = goroutine_states.get(state, 0) + 1
+
+        mutex_locks = goroutine_states.get('sync.Mutex.Lock', 0)
+        if mutex_locks > 0:
+            print(f"WARNING: {mutex_locks} goroutines blocked on sync.Mutex.Lock")
+
+        top_states = sorted(goroutine_states.items(), key=lambda x: -x[1])[:5]
+        print(f"Goroutine states: {dict(top_states)}")
+
+        return dump_file
+
+    except Exception as e:
+        print(f"Error capturing pprof dump: {e}")
+        return None
+
+def capture_erigon_logs():
+    """Capture recent Erigon logs for context."""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = DUMP_DIR / f"erigon_logs_{timestamp}.txt"
+
+        result = subprocess.run(
+            ["journalctl", "-u", "erigon", "--since", "10 min ago", "--no-pager"],
+            capture_output=True, text=True, timeout=10
+        )
+
+        log_file.write_text(result.stdout)
+        print(f"Captured Erigon logs: {log_file}")
+
+        return log_file
+
+    except Exception as e:
+        print(f"Error capturing Erigon logs: {e}")
+        return None
+
+def restart_service(service_name):
+    """Restart a systemd service."""
+    print(f"Restarting {service_name}...")
+    try:
+        subprocess.run(
+            ["systemctl", "restart", service_name],
+            check=True, timeout=30
+        )
+        print(f"{service_name} restarted successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to restart {service_name}: {e}")
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"Timeout restarting {service_name}")
+        return False
+
+def cleanup_old_dumps(max_files=20):
+    """Keep only the most recent dump files."""
+    try:
+        dumps = sorted(DUMP_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime)
+        while len(dumps) > max_files:
+            oldest = dumps.pop(0)
+            oldest.unlink()
+            print(f"Cleaned up old dump: {oldest.name}")
+    except Exception as e:
+        print(f"Error cleaning up dumps: {e}")
+
+def main():
+    global erigon_restart_count, last_successful_drift
+
+    if not REFERENCE_URL:
+        print("ERROR: REFERENCE_URL environment variable not set")
+        sys.exit(1)
+
+    print(f"Erigon Watchdog v2 starting")
+    print(f"  Reference: {REFERENCE_URL}")
+    print(f"  Local: {LOCAL_URL}")
+    print(f"  Threshold: {THRESHOLD}")
+    print(f"  External CL: {EXTERNAL_CL} ({CL_SERVICE})")
+    print(f"  Dump directory: {DUMP_DIR}")
+
+    while True:
+        drift = get_block_drift()
+
+        if drift is None:
+            print("Could not determine drift")
+            time.sleep(60)
+            continue
+
+        # Log drift (main output for monitoring)
+        if drift > THRESHOLD:
+            print(f"{drift} (threshold: {THRESHOLD})")
+        else:
+            print(str(drift))
+            # Reset restart counter on healthy operation
+            if drift < THRESHOLD // 2:
+                erigon_restart_count = 0
+            last_successful_drift = drift
+            time.sleep(60)
+            continue
+
+        # === Drift exceeds threshold - diagnose and act ===
+
+        # Check 1: Aggregation in progress? (wait it out)
+        if check_recent_logs("aggregat"):
+            print("Aggregation in progress, waiting...")
+            time.sleep(60)
+            continue
+
+        # Check 2: CL communication failure? (restart CL, not Erigon)
+        if EXTERNAL_CL and check_recent_logs("no CL requests"):
+            print("Detected CL communication failure")
+            capture_pprof_dump()
+            capture_erigon_logs()
+            restart_service(CL_SERVICE)
+            erigon_restart_count = 0
+            time.sleep(60)
+            continue
+
+        # Check 3: Too many Erigon restarts without improvement?
+        if erigon_restart_count >= MAX_ERIGON_RESTARTS:
+            print(f"Erigon restarted {erigon_restart_count} times without recovery")
+            if EXTERNAL_CL:
+                print("Trying CL restart instead")
+                capture_pprof_dump()
+                capture_erigon_logs()
+                restart_service(CL_SERVICE)
+                erigon_restart_count = 0
+                time.sleep(60)
+                continue
+            else:
+                print("No external CL configured, continuing with Erigon restarts")
+                erigon_restart_count = 0
+
+        # Default: Restart Erigon
+        print(f"restarting Erigon (attempt {erigon_restart_count + 1})")
+        capture_pprof_dump()
+        capture_erigon_logs()
+        restart_service("erigon")
+        erigon_restart_count += 1
+
+        # Cleanup old dumps periodically
+        cleanup_old_dumps()
+
+        time.sleep(60)
+
+if __name__ == "__main__":
+    main()
