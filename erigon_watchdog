@@ -45,11 +45,6 @@ MAX_ERIGON_RESTARTS = int(os.environ.get("MAX_ERIGON_RESTARTS", "3"))
 # Runtime directory for dumps (provided by systemd RuntimeDirectory=)
 DUMP_DIR = Path(os.environ.get("RUNTIME_DIRECTORY", "/run/erigon_watchdog"))
 
-# State tracking
-erigon_restart_count = 0
-last_successful_drift = None
-is_restarted = False
-
 # D-Bus connection
 bus = None
 manager = None
@@ -199,7 +194,10 @@ def cleanup_old_dumps(max_files=20):
         print(f"Error cleaning up dumps: {e}")
 
 def main():
-    global erigon_restart_count, last_successful_drift, is_restarted, bus, manager
+    global bus, manager
+
+    # State tracking
+    is_restarted = False
 
     if not REFERENCE_URL:
         print("ERROR: REFERENCE_URL environment variable not set")
@@ -254,40 +252,21 @@ def main():
                 time.sleep(60)
                 continue
 
-            # Check 3: Too many Erigon restarts without improvement?
-            if erigon_restart_count >= MAX_ERIGON_RESTARTS:
-                print(f"Erigon restarted {erigon_restart_count} times without recovery")
-                if EXTERNAL_CL:
-                    print("Trying CL restart instead")
-                    capture_iostat(timestamp)
-                    capture_pprof_dump(timestamp)
-                    capture_erigon_logs(timestamp)
-                    if restart_service(CL_SERVICE):
-                        is_restarted = True
-                    erigon_restart_count = 0
-                    time.sleep(60)
-                    continue
-                else:
-                    print("No external CL configured, continuing with Erigon restarts")
-                    erigon_restart_count = 0
-
             # Default: Restart Erigon
-            print(f"restarting Erigon (attempt {erigon_restart_count + 1})")
+            print(f"restarting Erigon")
             capture_iostat(timestamp)
             capture_pprof_dump(timestamp)
             capture_erigon_logs(timestamp)
             if restart_service("erigon"):
-                erigon_restart_count += 1
                 is_restarted = True
 
             # Cleanup old dumps periodically
             cleanup_old_dumps()
         else:
-            # Below threshold - reset restart flag
+            # Below threshold - reset restart flag if possible
             print(f"{drift}")
-            is_restarted = False
-            erigon_restart_count = 0
-            last_successful_drift = drift
+            if drift <= 5: # or drift == 0:
+                is_restarted = False
 
         time.sleep(60)
 
