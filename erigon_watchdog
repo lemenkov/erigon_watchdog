@@ -27,8 +27,9 @@ import sys
 import time
 import urllib.request
 import dbus
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from systemd import journal
 
 # Ensure stdout is line-buffered for real-time logging to journald
 sys.stdout.reconfigure(line_buffering=True)
@@ -107,20 +108,15 @@ def get_block_drift():
 def check_recent_logs(pattern, minutes=5):
     """Check if pattern appears in recent Erigon logs."""
     try:
-        result = subprocess.run(
-            [
-                "journalctl",
-                "-u",
-                "erigon",
-                "--since",
-                f"{minutes} min ago",
-                "--no-pager",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return pattern.lower() in result.stdout.lower()
+        j = journal.Reader()
+        j.add_match(_SYSTEMD_UNIT="erigon.service")
+        j.seek_realtime(datetime.now() - timedelta(minutes=minutes))
+
+        pattern_lower = pattern.lower()
+        for entry in j:
+            if pattern_lower in entry['MESSAGE'].lower():
+                return True
+        return False
     except Exception as e:
         print(f"Error checking logs: {e}")
         return False
@@ -170,13 +166,12 @@ def capture_erigon_logs(timestamp):
     """Capture recent Erigon logs for context."""
     try:
         log_file = DUMP_DIR / f"erigon_logs_{timestamp}.txt"
-        result = subprocess.run(
-            ["journalctl", "-u", "erigon", "--since", "10 min ago", "--no-pager"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        log_file.write_text(result.stdout)
+        j = journal.Reader()
+        j.add_match(_SYSTEMD_UNIT="erigon.service")
+        j.seek_realtime(datetime.now() - timedelta(minutes=10))
+
+        lines = [f"{e['__REALTIME_TIMESTAMP']} {e['MESSAGE']}" for e in j]
+        log_file.write_text('\n'.join(lines))
         print(f"Captured Erigon logs: {log_file}")
     except Exception as e:
         print(f"Error capturing Erigon logs: {e}")
