@@ -20,7 +20,7 @@ Environment variables (via /etc/sysconfig/erigon_watchdog):
     CL_SERVICE          - Consensus layer service name (default: beacon-chain)
     MAX_ERIGON_RESTARTS - Max Erigon restarts before trying CL (default: 3)
     MGMT_ADDR           - Management API listen address (default: 127.0.0.1)
-    MGMT_PORT           - Management API listen port (default: 8551)
+    MGMT_PORT           - Management API listen port (default: 8080)
 
 Management API:
     GET  /status            - Current status (drift, threshold, restarts, etc.)
@@ -54,7 +54,7 @@ EXTERNAL_CL = os.environ.get("EXTERNAL_CL", "0") == "1"
 CL_SERVICE = os.environ.get("CL_SERVICE", "beacon-chain")
 MAX_ERIGON_RESTARTS = int(os.environ.get("MAX_ERIGON_RESTARTS", "3"))
 MGMT_ADDR = os.environ.get("MGMT_ADDR", "127.0.0.1")
-MGMT_PORT = int(os.environ.get("MGMT_PORT", "8551"))
+MGMT_PORT = int(os.environ.get("MGMT_PORT", "8080"))
 
 # Runtime directory for dumps (provided by systemd RuntimeDirectory=)
 DUMP_DIR = Path(os.environ.get("RUNTIME_DIRECTORY", "/run/erigon_watchdog"))

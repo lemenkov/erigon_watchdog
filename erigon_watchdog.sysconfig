@@ -25,3 +25,9 @@ CL_SERVICE=beacon-chain
 
 # Max Erigon restarts before trying CL restart (default: 3)
 MAX_ERIGON_RESTARTS=3
+
+# Management API listen address
+MGMT_ADDR=127.0.0.1
+
+# Management API listen port
+MGMT_PORT=8080

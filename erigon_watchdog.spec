@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 Name:           erigon_watchdog
-Version:        3.0.0
+Version:        3.0.1
 Release:        %autorelease
 Summary:        A simple watchdog application for Erigon
 License:        MIT
