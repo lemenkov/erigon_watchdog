@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: 2025 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 """
-Erigon Watchdog v2 - Multi-failure detection with diagnostics capture
+Erigon Watchdog v3 - Multi-failure detection with diagnostics capture
 
 Features:
 - Captures pprof goroutine dump before restart (for post-mortem analysis)
 - Detects CL failures ("no CL requests") and restarts beacon-chain instead
 - Detects aggregation in progress and waits instead of restarting
 - Tracks restart effectiveness to detect wrong-service-restart loops
+- HTTP management API for runtime configuration
 
 Environment variables (via /etc/sysconfig/erigon_watchdog):
     REFERENCE_URL       - URL to get reference block height (required)
@@ -18,6 +19,13 @@ Environment variables (via /etc/sysconfig/erigon_watchdog):
     EXTERNAL_CL         - Set to "1" if using external CL like Prysm (default: 0)
     CL_SERVICE          - Consensus layer service name (default: beacon-chain)
     MAX_ERIGON_RESTARTS - Max Erigon restarts before trying CL (default: 3)
+    MGMT_ADDR           - Management API listen address (default: 127.0.0.1)
+    MGMT_PORT           - Management API listen port (default: 8551)
+
+Management API:
+    GET  /status            - Current status (drift, threshold, restarts, etc.)
+    POST /threshold/<N>     - Set threshold to N (0 = pause restarts)
+    POST /threshold/default - Reset threshold to config value
 """
 
 import json
@@ -27,7 +35,10 @@ import sys
 import time
 import urllib.request
 import dbus
+import threading
 from datetime import datetime, timedelta
+from functools import partial
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from systemd import journal
 
@@ -37,11 +48,13 @@ sys.stdout.reconfigure(line_buffering=True)
 # Configuration from environment
 REFERENCE_URL = os.environ.get("REFERENCE_URL")
 LOCAL_URL = os.environ.get("LOCAL_URL", "http://localhost:8545")
-THRESHOLD = int(os.environ.get("THRESHOLD", "20"))
+CONFIG_THRESHOLD = int(os.environ.get("THRESHOLD", "20"))
 PPROF_URL = os.environ.get("PPROF_URL", "http://localhost:6060")
 EXTERNAL_CL = os.environ.get("EXTERNAL_CL", "0") == "1"
 CL_SERVICE = os.environ.get("CL_SERVICE", "beacon-chain")
 MAX_ERIGON_RESTARTS = int(os.environ.get("MAX_ERIGON_RESTARTS", "3"))
+MGMT_ADDR = os.environ.get("MGMT_ADDR", "127.0.0.1")
+MGMT_PORT = int(os.environ.get("MGMT_PORT", "8551"))
 
 # Runtime directory for dumps (provided by systemd RuntimeDirectory=)
 DUMP_DIR = Path(os.environ.get("RUNTIME_DIRECTORY", "/run/erigon_watchdog"))
@@ -49,6 +62,102 @@ DUMP_DIR = Path(os.environ.get("RUNTIME_DIRECTORY", "/run/erigon_watchdog"))
 # D-Bus connection
 bus = None
 manager = None
+
+# Shared state (protected by lock)
+state_lock = threading.Lock()
+state = {
+    "active_threshold": CONFIG_THRESHOLD,
+    "current_drift": None,
+    "is_restarted": False,
+    "last_restart": None,
+    "restart_count": 0,
+    "start_time": datetime.now().isoformat(),
+}
+
+
+class MgmtHandler(BaseHTTPRequestHandler):
+    """HTTP handler for management API."""
+
+    def log_message(self, format, *args):
+        """Log to stdout instead of stderr."""
+        print(f"MGMT: {args[0]}")
+
+    def send_json(self, data, status=200):
+        """Send JSON response."""
+        body = json.dumps(data, indent=2).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        """Handle GET requests."""
+        if self.path == "/status":
+            with state_lock:
+                response = {
+                    "config_threshold": CONFIG_THRESHOLD,
+                    "active_threshold": state["active_threshold"],
+                    "paused": state["active_threshold"] == 0,
+                    "current_drift": state["current_drift"],
+                    "is_restarted": state["is_restarted"],
+                    "last_restart": state["last_restart"],
+                    "restart_count": state["restart_count"],
+                    "start_time": state["start_time"],
+                    "uptime_seconds": int((datetime.now() - datetime.fromisoformat(state["start_time"])).total_seconds()),
+                }
+            self.send_json(response)
+        else:
+            self.send_json({"error": "Not found"}, 404)
+
+    def do_POST(self):
+        """Handle POST requests."""
+        # Normalize /pause and /resume to threshold endpoints
+        path = self.path
+        if path == "/pause":
+            path = "/threshold/0"
+        elif path == "/resume":
+            path = "/threshold/default"
+
+        if path.startswith("/threshold/"):
+            value = path.split("/threshold/")[1]
+
+            with state_lock:
+                if value == "default":
+                    state["active_threshold"] = CONFIG_THRESHOLD
+                    print(f"Threshold reset to default: {CONFIG_THRESHOLD}")
+                else:
+                    try:
+                        new_threshold = int(value)
+                        if new_threshold < 0:
+                            self.send_json({"error": "Threshold must be >= 0"}, 400)
+                            return
+                        state["active_threshold"] = new_threshold
+                        if new_threshold == 0:
+                            print("Restarts PAUSED (threshold set to 0)")
+                        else:
+                            print(f"Threshold changed to: {new_threshold}")
+                    except ValueError:
+                        self.send_json({"error": "Invalid threshold value"}, 400)
+                        return
+
+                response = {
+                    "config_threshold": CONFIG_THRESHOLD,
+                    "active_threshold": state["active_threshold"],
+                    "paused": state["active_threshold"] == 0,
+                }
+            self.send_json(response)
+        else:
+            self.send_json({"error": "Not found"}, 404)
+
+
+def start_mgmt_server():
+    """Start the management HTTP server in a background thread."""
+    server = HTTPServer((MGMT_ADDR, MGMT_PORT), MgmtHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"Management API listening on http://{MGMT_ADDR}:{MGMT_PORT}")
+    return server
 
 
 def get_systemd_manager():
@@ -149,8 +258,8 @@ def capture_pprof_dump(timestamp):
         goroutine_states = {}
         for line in dump_content.split("\n"):
             if line.startswith("goroutine ") and "[" in line:
-                state = line.split("[")[1].split("]")[0].split(",")[0]
-                goroutine_states[state] = goroutine_states.get(state, 0) + 1
+                state_str = line.split("[")[1].split("]")[0].split(",")[0]
+                goroutine_states[state_str] = goroutine_states.get(state_str, 0) + 1
 
         mutex_locks = goroutine_states.get("sync.Mutex.Lock", 0)
         if mutex_locks > 0:
@@ -215,9 +324,6 @@ def cleanup_old_dumps(max_files=20):
 def main():
     global bus, manager
 
-    # State tracking
-    is_restarted = False
-
     if not REFERENCE_URL:
         print("ERROR: REFERENCE_URL environment variable not set")
         sys.exit(1)
@@ -225,22 +331,37 @@ def main():
     # Initialize D-Bus connection
     bus, manager = get_systemd_manager()
 
-    print(f"Erigon Watchdog v2 starting")
+    # Start management API server
+    start_mgmt_server()
+
+    print(f"Erigon Watchdog v3 starting")
     print(f"  Reference: {REFERENCE_URL}")
     print(f"  Local: {LOCAL_URL}")
-    print(f"  Threshold: {THRESHOLD}")
+    print(f"  Threshold: {CONFIG_THRESHOLD}")
     print(f"  External CL: {EXTERNAL_CL} ({CL_SERVICE})")
     print(f"  Dump directory: {DUMP_DIR}")
 
     while True:
         drift = get_block_drift()
 
+        # Update shared state
+        with state_lock:
+            state["current_drift"] = drift
+            active_threshold = state["active_threshold"]
+            is_restarted = state["is_restarted"]
+
         if drift is None:
             print("Could not determine drift")
             time.sleep(60)
             continue
 
-        if drift > THRESHOLD:
+        # Check if paused (threshold == 0)
+        if active_threshold == 0:
+            print(f"{drift} (paused)")
+            time.sleep(60)
+            continue
+
+        if drift > active_threshold:
             # Above threshold
             if is_restarted:
                 # Already restarted, wait for recovery
@@ -248,7 +369,7 @@ def main():
                 time.sleep(60)
                 continue
 
-            print(f"{drift} (threshold: {THRESHOLD})")
+            print(f"{drift} (threshold: {active_threshold})")
 
             # === Drift exceeds threshold - diagnose and act ===
             DUMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -267,7 +388,10 @@ def main():
                 capture_pprof_dump(timestamp)
                 capture_erigon_logs(timestamp)
                 if restart_service(CL_SERVICE):
-                    is_restarted = True
+                    with state_lock:
+                        state["is_restarted"] = True
+                        state["last_restart"] = datetime.now().isoformat()
+                        state["restart_count"] += 1
                 time.sleep(60)
                 continue
 
@@ -277,15 +401,19 @@ def main():
             capture_pprof_dump(timestamp)
             capture_erigon_logs(timestamp)
             if restart_service("erigon"):
-                is_restarted = True
+                with state_lock:
+                    state["is_restarted"] = True
+                    state["last_restart"] = datetime.now().isoformat()
+                    state["restart_count"] += 1
 
             # Cleanup old dumps periodically
             cleanup_old_dumps()
         else:
             # Below threshold - reset restart flag if possible
             print(f"{drift}")
-            if drift <= 5:  # or drift == 0:
-                is_restarted = False
+            if drift <= 5:
+                with state_lock:
+                    state["is_restarted"] = False
 
         time.sleep(60)
 
